@@ -94,19 +94,52 @@ export function apply(ctx, config) {
   const passThrough = { parse: value => value }
   let planHandle = null
 
+  /**
+   * Normalise the arguments a tool call carried: a plain call logs a JSON string,
+   * a PTC dispatch may log the object itself.
+   * @param raw - arguments from the event.
+   * @returns the parsed object, or null.
+   */
+  const argsOf = raw => {
+    if (typeof raw === 'string') {
+      try {
+        return JSON.parse(raw)
+      } catch {
+        return null
+      }
+    }
+    return raw !== null && typeof raw === 'object' ? raw : null
+  }
+
+  /**
+   * Read one tool call out of either lifecycle: native logs `tool/call`, PTC
+   * sessions log the nested call as `tool/ptc-dispatch` with a `subCallId`.
+   * @param event - a session event.
+   * @returns the call's name, raw arguments and id, or null.
+   */
+  const toolCallOf = event => {
+    const data = event.data
+    if (data === undefined || data === null) return null
+    if (event.type === 'tool/call') {
+      return { name: data.name, raw: data.arguments, callId: String(data.callId ?? '') }
+    }
+    if (event.type === 'tool/ptc-dispatch') {
+      return { name: data.name, raw: data.arguments, callId: String(data.subCallId ?? '') }
+    }
+    return null
+  }
+
   const foldPlan = (state, event) => {
+    const call = toolCallOf(event)
+
     // The gate call opens a task, or keeps the approved one while a turn merely
     // continues it: `needsConfirmation: false` is an explicit continuation.
-    if (event.type === 'tool/call' && event.data?.name === CONFIRM_TOOL) {
-      let args
-      try {
-        args = JSON.parse(event.data.arguments ?? '{}')
-      } catch {
-        return state
-      }
+    if (call !== null && call.name === CONFIRM_TOOL) {
+      const args = argsOf(call.raw)
+      if (args === null) return state
       const continues = args.needsConfirmation === false && args.isRevision !== true
       if (continues && (state.status === 'approved' || state.status === 'edited')) {
-        return { ...state, callId: String(event.data.callId ?? state.callId) }
+        return { ...state, callId: call.callId === '' ? state.callId : call.callId }
       }
       const steps = (Array.isArray(args.steps) ? args.steps : [])
         .map(text => ({ text: String(text), status: 'todo' }))
@@ -114,19 +147,15 @@ export function apply(ctx, config) {
         restatement: String(args.restatement ?? ''),
         steps,
         status: 'awaiting',
-        callId: String(event.data.callId ?? ''),
+        callId: call.callId,
         revision: args.isRevision === true,
         decidedBy: '',
       }
     }
 
-    if (event.type === 'tool/call' && event.data?.name === PROGRESS_TOOL) {
-      let args
-      try {
-        args = JSON.parse(event.data.arguments ?? '{}')
-      } catch {
-        return state
-      }
+    if (call !== null && call.name === PROGRESS_TOOL) {
+      const args = argsOf(call.raw)
+      if (args === null) return state
       const index = Number(args.step) - 1
       if (!Number.isInteger(index) || index < 0 || index >= state.steps.length) return state
       return {
