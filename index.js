@@ -137,15 +137,19 @@ export function apply(ctx, config) {
     if (call !== null && call.name === CONFIRM_TOOL) {
       const args = argsOf(call.raw)
       if (args === null) return state
+      const steps = Array.isArray(args.steps) ? args.steps.map(String).filter(t => t.trim() !== '') : []
+      const restatement = String(args.restatement ?? '').trim()
+      // Nothing to show is not a card: a bare continuation call must never
+      // replace the plan with an empty one (that is what produced a card with
+      // an empty body).
+      if (steps.length === 0 && restatement === '') return state
       const continues = args.needsConfirmation === false && args.isRevision !== true
       if (continues && (state.status === 'approved' || state.status === 'edited')) {
         return { ...state, callId: call.callId === '' ? state.callId : call.callId }
       }
-      const steps = (Array.isArray(args.steps) ? args.steps : [])
-        .map(text => ({ text: String(text), status: 'todo' }))
       return {
-        restatement: String(args.restatement ?? ''),
-        steps,
+        restatement,
+        steps: steps.map(text => ({ text, status: 'todo' })),
         status: 'awaiting',
         callId: call.callId,
         revision: args.isRevision === true,
@@ -365,6 +369,15 @@ export function apply(ctx, config) {
           restatement: record.restatement,
           steps: record.steps.map(step => step.text),
         }
+      }
+
+      // A call with nothing to show cannot open a card. Refuse it loudly so the
+      // model retries as a real task instead of leaving an empty card on screen.
+      if (steps.length === 0 && restatement === '') {
+        gates.set(exec.agent, { state: 'open' })
+        throw new Error(`${CONFIRM_TOOL} needs a restatement and 3-5 steps to show the user; `
+          + 'a call with neither is refused. If this turn merely continues an approved plan, '
+          + 'pass needsConfirmation false together with that plan\'s restatement and steps.')
       }
 
       if (args.needsConfirmation === false && args.isRevision !== true) {
