@@ -6,7 +6,7 @@
 
 ## 零、适用范围（先看这条）
 
-**目前仅 native 会话可用。** PTC（`run_code`）会话里卡片会出现、按钮可用，但闸门无法强制拦截——`run_code` 必须放行，否则会话死锁。详见 README「PTC 会话：不支持」。
+**强制拦截仅 native 会话可用**；PTC（`run_code`）会话里卡片与按钮可用，但闸门无法强制拦截——`run_code` 必须放行，否则会话死锁。详见 README「PTC 会话：卡片支持，拦截不支持」。
 
 ## 一、准入要求（官方原话归纳）
 
@@ -72,8 +72,8 @@ url: https://github.com/zzr1iu008/dsh-task-align
 name: zzr1iu008/dsh-task-align
 category: ui
 description:
-  en: Pauses a multi-step task before it starts in native sessions — the model restates the goal and a 3-5 step plan in a card above the composer, every other tool stays blocked until you confirm, and the same card then tracks the current step and a ticked-off checklist.
-  zh: 仅在 native 会话生效：多步任务动手前先停一下，模型把目标与 3–5 步计划复述在输入框上方的卡片里，确认之前其余工具全部被拦下；确认后同一张卡片显示当前第几步与逐条清单进度。
+  en: Pauses a multi-step task before it starts — the model restates the goal and a 3-5 step plan in a card above the composer, and in native sessions every other tool stays blocked until you confirm; the same card then tracks the current step and a ticked-off checklist.
+  zh: 多步任务动手前先停一下：模型把目标与 3–5 步计划复述在输入框上方的卡片里，native 会话里确认之前其余工具全部被拦下；确认后同一张卡片显示当前第几步与逐条清单进度。
 icon: https://raw.githubusercontent.com/zzr1iu008/dsh-task-align/main/assets/icon-180.png
 ```
 
