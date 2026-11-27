@@ -158,9 +158,16 @@ export function apply(ctx, config) {
       if (args === null) return state
       const index = Number(args.step) - 1
       if (!Number.isInteger(index) || index < 0 || index >= state.steps.length) return state
+      const status = String(args.status)
+      // Reporting a LATER step proves the earlier one is settled: a model that
+      // forgets to close step N must not leave it "in progress" forever.
       return {
         ...state,
-        steps: state.steps.map((step, i) => (i === index ? { ...step, status: String(args.status) } : step)),
+        steps: state.steps.map((step, i) => {
+          if (i === index) return { ...step, status }
+          if (i < index && step.status === 'doing') return { ...step, status: 'done' }
+          return step
+        }),
       }
     }
 
