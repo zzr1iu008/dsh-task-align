@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Task alignment",
+    "description": "Restates the goal and a 3-5 step plan for your approval before any tool runs, then shows the current step. Applies to complex tasks you send yourself; an unapproved gate waits until you decide."
+  }
+}

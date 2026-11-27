@@ -1,0 +1,9 @@
+# The gate no longer runs on a timer: it is recorded, then settled by
+# `/task-align confirm | edit <text> | decline`, or by `/task-align done`.
+- insert:
+    - id: task-align
+      name: 'dsh-task-align'
+      config:
+        progressTool: true
+    - id: task-align-skills
+      name: 'dsh-task-align/skills'
