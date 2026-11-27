@@ -23,7 +23,6 @@ window.__ModuleLoader__.load({
     const h = React.createElement
 
     const TOOL = 'confirm_task_understanding'
-    const PROGRESS = 'update_task_progress'
     const NS = 'taskAlign'
 
     const zh = {
@@ -239,23 +238,6 @@ window.__ModuleLoader__.load({
 
 `
 
-    /**
-     * Find the gate call that is still waiting. A running call exposes its
-     * complete `argsRaw`; once a result lands it leaves `runningCalls`, which
-     * is what makes the card disappear by itself.
-     * @param useChat - the slot's Chat selector hook.
-     * @returns the started call, or null.
-     */
-    function pendingCall(useChat) {
-      const running = useChat(snapshot => (snapshot && snapshot.legacy ? snapshot.legacy.runningCalls : undefined))
-      if (!Array.isArray(running)) return null
-      for (let i = running.length - 1; i >= 0; i--) {
-        const call = running[i]
-        if (call && call.name === TOOL && call.phase === 'start' && typeof call.argsRaw === 'string') return call
-      }
-      return null
-    }
-
     /** Summaries the user closed in this page session; a reload clears them. */
     const dismissed = new Set()
 
@@ -308,166 +290,6 @@ window.__ModuleLoader__.load({
           return h('button', { type: 'button', className: 'ta-btn ' + style, disabled, onClick }, label)
         }
 
-        /** Read the most recent settled gate call out of the Chat node stream. */
-        function summarize(nodes) {
-          // The newest gate result decides the STATUS; the newest one that
-          // actually proposed a plan decides the BASELINE. A continuation call
-          // only says "still on it" and must not redefine the plan, otherwise
-          // the step count restarts on every turn.
-          let gateIndex = -1
-          let gateNode = null
-          let planIndex = -1
-          let planNode = null
-          for (let i = nodes.length - 1; i >= 0; i--) {
-            const node = nodes[i]
-            if (!node || node.kind !== 'tool-result' || node.name !== TOOL) continue
-            if (gateNode === null) { gateIndex = i; gateNode = node }
-            if (planNode === null) {
-              let candidate = null
-              try {
-                candidate = JSON.parse(node.call && node.call.argsRaw ? node.call.argsRaw : '{}')
-              } catch {
-                candidate = null
-              }
-              if (candidate !== null && candidate.needsConfirmation !== false) {
-                planIndex = i
-                planNode = node
-                break
-              }
-            }
-          }
-          if (gateNode === null) return null
-          if (planNode === null) { planNode = gateNode; planIndex = gateIndex }
-          // A summary belongs to the turn that produced it: as soon as another
-          // human message lands, the previous task's line must stop showing.
-          // The plugin's own wake-up message is user-role too, so it must be
-          // exempted here exactly as it is in the host's pre-step hook — else
-          // confirming a plan wipes the very summary the user just earned.
-          // The marker is matched on the serialized node because the node shape
-          // is not part of this package's contract.
-          // Status first: whether a later human message retires the row depends
-          // on it, and a pending gate must never be retired that way.
-          let status = 'confirmed'
-          const content = gateNode.content
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (!block || block.type !== 'text' || typeof block.text !== 'string') continue
-              const found = block.text.match(/^\[task-align:([a-z]+)\]/)
-              if (found !== null) { status = found[1]; break }
-            }
-          }
-
-          let wakeAfterPlan = false
-          let declinedAfterPlan = false
-          let sawLaterUserMessage = false
-          // A wake-up message only decides THIS gate when it lands after the
-          // newest gate call; messages left over from an earlier task must not
-          // mark a fresh awaiting card as already answered.
-          const wakeFrom = Math.max(planIndex, gateIndex) + 1
-          for (let i = planIndex + 1; i < nodes.length; i++) {
-            const node = nodes[i]
-            if (!node || node.kind !== 'user') continue
-            let serialized = ''
-            try {
-              serialized = JSON.stringify(node)
-            } catch {
-              serialized = ''
-            }
-            const isDeclined = serialized.includes('[task-align:declined]')
-            const isWake = !isDeclined && serialized.includes('[task-align] ')
-            if (isDeclined || isWake) {
-              if (i >= wakeFrom) {
-                if (isDeclined) declinedAfterPlan = true
-                else wakeAfterPlan = true
-              }
-              continue
-            }
-            sawLaterUserMessage = true
-          }
-
-          // Clicking a button appends a wake-up message; that is the only log
-          // trace of the decision, so it is what turns the card into a receipt.
-          if (status === 'awaiting' && declinedAfterPlan) status = 'declined'
-          else if (status === 'awaiting' && wakeAfterPlan) status = 'approved'
-
-          // A receipt belongs to the turn that produced it: a later human message
-          // retires it. A PENDING CARD is not a receipt — it stays until answered,
-          // otherwise asking "where is the card?" would hide the card itself.
-          if (sawLaterUserMessage && status !== 'awaiting') return null
-          let restatement = ''
-          let stepCount = 0
-          let stepTexts = []
-          let revision = false
-          // A pending card speaks for ITSELF: its restatement and steps come from
-          // the gate call that is waiting, not from an older approved plan.
-          const sourceNode = status === 'awaiting' ? gateNode : planNode
-          const raw = sourceNode.call && typeof sourceNode.call.argsRaw === 'string' ? sourceNode.call.argsRaw : null
-          if (raw !== null) {
-            try {
-              const parsed = JSON.parse(raw)
-              restatement = String(parsed.restatement ?? '')
-              stepTexts = Array.isArray(parsed.steps) ? parsed.steps.map(String) : []
-              stepCount = stepTexts.length
-              revision = parsed.isRevision === true
-            } catch {
-              stepCount = 0
-            }
-          }
-          // Count DISTINCT step numbers, not report count: re-reporting a step
-          // must not inflate the bar, and a plan revision that re-reports an
-          // already finished step must not overflow it.
-          // Per-step status, not a running total: the last report for a step wins,
-          // so the line can show which step is RUNNING and how many FINISHED.
-          const stepStatus = new Map()
-          for (let i = planIndex + 1; i < nodes.length; i++) {
-            const node = nodes[i]
-            if (!node || node.kind !== 'tool-result' || node.name !== PROGRESS) continue
-            let args = null
-            try {
-              args = JSON.parse(node.call && node.call.argsRaw ? node.call.argsRaw : '{}')
-            } catch {
-              args = null
-            }
-            if (args === null) continue
-            const step = Number(args.step)
-            if (!Number.isInteger(step) || step < 1) continue
-            stepStatus.set(step, String(args.status ?? 'done'))
-          }
-          // A `doing` report is only true until the model moves on. Reporting a
-          // LATER step proves the earlier one is settled, so promote it instead of
-          // leaving a stale "step N in progress" beside "turn finished".
-          let maxReported = 0
-          for (const step of stepStatus.keys()) maxReported = Math.max(maxReported, step)
-          for (const [step, status] of stepStatus.entries()) {
-            if (status === 'doing' && step < maxReported) stepStatus.set(step, 'done')
-          }
-          let reported = 0
-          for (const status of stepStatus.values()) {
-            if (status === 'done' || status === 'skipped') reported++
-          }
-          reported = Math.min(reported, stepCount)
-          let currentStep = null
-          for (const [step, status] of stepStatus.entries()) {
-            if (status === 'doing') currentStep = Math.max(currentStep ?? 0, step)
-          }
-          // One entry per plan step, with the state the reports left it in.
-          const stepStates = stepTexts.map((text, index) => {
-            const status = stepStatus.get(index + 1)
-            return { text, status: status === 'done' || status === 'skipped' ? 'done' : (status === 'doing' ? 'doing' : 'todo') }
-          })
-          return {
-            status,
-            restatement,
-            steps: stepTexts,
-            stepStates,
-            stepCount,
-            reported,
-            currentStep,
-            revision,
-            callId: String(gateNode.callId ?? ''),
-          }
-        }
-
         const STATUS_LABEL = {
           confirmed: '已确认',
           approved: '按已批准计划继续',
@@ -482,11 +304,58 @@ window.__ModuleLoader__.load({
         }
 
         /** The gate card above the composer, plus its settled one-line summary. */
+        /**
+         * Read this session's plan state from the host projection.
+         * @param useProjection - the slot's projection hook.
+         * @returns the state, or null before a task and when the projection is absent.
+         */
+        function readPlan(useProjection) {
+          if (typeof useProjection !== 'function') return null
+          let state = null
+          try {
+            state = useProjection('taskAlignPlan')
+          } catch {
+            state = null
+          }
+          if (state === null || state === undefined || state.status === 'idle') return null
+          return state
+        }
+
+        /**
+         * Shape the projection state for rendering.
+         * @param plan - the projection state, or null.
+         * @returns null, or a view with per-step states and totals.
+         */
+        function buildSummary(plan) {
+          if (plan === null) return null
+          const steps = Array.isArray(plan.steps) ? plan.steps : []
+          const stepStates = steps.map(step => {
+            const status = String(step && step.status ? step.status : 'todo')
+            return {
+              text: String(step && step.text ? step.text : ''),
+              status: status === 'done' || status === 'skipped' ? 'done' : (status === 'doing' ? 'doing' : 'todo'),
+            }
+          })
+          const doingIndex = stepStates.findIndex(step => step.status === 'doing')
+          return {
+            status: String(plan.status ?? ''),
+            restatement: String(plan.restatement ?? ''),
+            steps: stepStates.map(step => step.text),
+            stepStates,
+            stepCount: stepStates.length,
+            reported: stepStates.filter(step => step.status === 'done').length,
+            currentStep: doingIndex < 0 ? null : doingIndex + 1,
+            revision: plan.revision === true,
+            callId: String(plan.callId ?? ''),
+          }
+        }
+
         function AlignCard(props) {
           const tr = translator(props.t)
           const sessionId = props.sessionId
-          const call = pendingCall(props.useChat)
-          const nodes = props.useChat(snapshot => (snapshot && snapshot.legacy ? snapshot.legacy.nodes : undefined))
+          // Everything below comes from the host projection: the gate call records
+          // the plan, the `/task-align` command records the answer. No inference.
+          const summary = buildSummary(readPlan(props.useProjection))
           const [editing, setEditing] = React.useState(false)
           const [draft, setDraft] = React.useState('')
           const [busy, setBusy] = React.useState(false)
@@ -504,7 +373,7 @@ window.__ModuleLoader__.load({
             : undefined
           const [, bumpClosed] = React.useReducer(count => count + 1, 0)
 
-          const callId = call === null ? '' : call.callId
+          const callId = summary === null ? '' : summary.callId
           React.useEffect(() => {
             setEditing(false)
             setDraft('')
@@ -512,12 +381,10 @@ window.__ModuleLoader__.load({
             setBusy(false)
           }, [callId])
 
-          if (call === null) {
-            const summary = summarize(nodes)
-            if (summary === null) return null
-            // The gate tool returns at once now, so a settled call with status
-            // awaiting IS the pending gate: render the card from the log entry
-            // instead of from an in-flight call that any keystroke would abort.
+          if (summary === null) return null
+          {
+            // The host records "awaiting" when the gate tool is called; nothing
+            // else can produce it, so the card is a direct read, not a guess.
             if (summary.status === 'awaiting') {
               const gateSteps = Array.isArray(summary.steps) ? summary.steps.filter(Boolean) : []
               return renderCard({
@@ -612,20 +479,6 @@ window.__ModuleLoader__.load({
             )
           }
 
-          let args = null
-          try {
-            args = JSON.parse(call.argsRaw)
-          } catch {
-            args = null
-          }
-          if (args === null) return null
-
-          return renderCard({
-            restatement: String(args.restatement ?? ''),
-            steps: Array.isArray(args.steps) ? args.steps.map(String).filter(Boolean) : [],
-            isRevision: args.isRevision === true,
-          })
-
           function renderCard(gate) {
           const steps = gate.steps
           const send = line => {
@@ -692,36 +545,20 @@ window.__ModuleLoader__.load({
         /** The compact control beside the submit action. */
         function AlignMini(props) {
           const tr = translator(props.t)
-          const call = pendingCall(props.useChat)
-          if (call !== null) {
+          const summary = buildSummary(readPlan(props.useProjection))
+          if (summary !== null && summary.status === 'awaiting') {
             return h('span', { className: 'ta-mini', role: 'status' },
               h('span', { className: 'ta-mini-dot', 'aria-hidden': 'true' }),
               tr('mini.gate', '等待确认'),
             )
           }
-          const nodes = props.useChat(snapshot => (snapshot && snapshot.legacy ? snapshot.legacy.nodes : undefined))
-          if (!Array.isArray(nodes)) return null
-          for (let i = nodes.length - 1; i >= 0; i--) {
-            const node = nodes[i]
-            if (!node || node.kind !== 'tool-result' || node.name !== PROGRESS) continue
-            const raw = node.call && typeof node.call.argsRaw === 'string' ? node.call.argsRaw : null
-            if (raw === null) return null
-            let step = null
-            let status = ''
-            try {
-              const parsed = JSON.parse(raw)
-              step = Number(parsed.step)
-              status = String(parsed.status ?? '')
-            } catch {
-              return null
-            }
-            if (!Number.isFinite(step)) return null
-            const label = (status === 'done' ? tr('mini.done', '第 {step} 步已完成') : tr('mini.step', '第 {step} 步'))
-              .replace('{step}', String(step))
-            return h('span', { className: 'ta-mini', role: 'status', title: label },
-              h('span', { className: 'ta-mini-dot-idle', 'aria-hidden': 'true' }), label)
-          }
-          return null
+
+          if (summary === null || summary.currentStep === null) return null
+          const finished = summary.stepStates[summary.currentStep - 1].status === 'done'
+          const text = (finished ? tr('mini.done', '第 {step} 步已完成') : tr('mini.step', '第 {step} 步'))
+            .replace('{step}', String(summary.currentStep))
+          return h('span', { className: 'ta-mini', role: 'status', title: text },
+            h('span', { className: 'ta-mini-dot-idle', 'aria-hidden': 'true' }), text)
         }
 
         ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({

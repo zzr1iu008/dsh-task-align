@@ -80,51 +80,91 @@ export function apply(ctx, config) {
    * projection. Memory stays the fast path; this is what a reload reads back so
    * the step count and the approved plan survive.
    */
-  const EMPTY_PLAN = { restatement: '', steps: [], status: 'idle', callId: '', revision: false }
+  // Explicit state of one task, folded out of the session log. Nothing in the
+  // client infers a decision any more: the gate call says "awaiting", the
+  // `/task-align` command says how it ended, the progress tool says per-step.
+  const EMPTY_PLAN = {
+    restatement: '',
+    steps: [],
+    status: 'idle',
+    callId: '',
+    revision: false,
+    decidedBy: '',
+  }
   const passThrough = { parse: value => value }
   let planHandle = null
 
   const foldPlan = (state, event) => {
+    // The gate call opens a task, or keeps the approved one while a turn merely
+    // continues it: `needsConfirmation: false` is an explicit continuation.
     if (event.type === 'tool/call' && event.data?.name === CONFIRM_TOOL) {
+      let args
       try {
-        const args = JSON.parse(event.data.arguments ?? '{}')
-        const steps = (Array.isArray(args.steps) ? args.steps : [])
-          .map(text => ({ text: String(text), status: 'todo' }))
-        return {
-          restatement: String(args.restatement ?? ''),
-          steps,
-          status: 'awaiting',
-          callId: String(event.data.callId ?? ''),
-          revision: args.isRevision === true,
-        }
+        args = JSON.parse(event.data.arguments ?? '{}')
       } catch {
         return state
       }
+      const continues = args.needsConfirmation === false && args.isRevision !== true
+      if (continues && (state.status === 'approved' || state.status === 'edited')) {
+        return { ...state, callId: String(event.data.callId ?? state.callId) }
+      }
+      const steps = (Array.isArray(args.steps) ? args.steps : [])
+        .map(text => ({ text: String(text), status: 'todo' }))
+      return {
+        restatement: String(args.restatement ?? ''),
+        steps,
+        status: 'awaiting',
+        callId: String(event.data.callId ?? ''),
+        revision: args.isRevision === true,
+        decidedBy: '',
+      }
     }
+
     if (event.type === 'tool/call' && event.data?.name === PROGRESS_TOOL) {
+      let args
       try {
-        const args = JSON.parse(event.data.arguments ?? '{}')
-        const index = Number(args.step) - 1
-        if (!Number.isInteger(index) || index < 0 || index >= state.steps.length) return state
+        args = JSON.parse(event.data.arguments ?? '{}')
+      } catch {
+        return state
+      }
+      const index = Number(args.step) - 1
+      if (!Number.isInteger(index) || index < 0 || index >= state.steps.length) return state
+      return {
+        ...state,
+        steps: state.steps.map((step, i) => (i === index ? { ...step, status: String(args.status) } : step)),
+      }
+    }
+
+    // `/task-align confirm|edit …|decline|done` — the decision itself, recorded
+    // by the command, so no marker parsing and no "did the user click" guessing.
+    if (event.type === 'command/run' && event.data?.name === 'task-align') {
+      const text = String(event.data.args ?? '').trim()
+      if (/^(done|finish|完成|结束|收工)$/i.test(text)) {
+        return { ...state, status: 'done', decidedBy: 'done' }
+      }
+      if (/^(decline|cancel|no|n|取消|不|停)$/i.test(text)) {
+        return { ...state, status: 'declined', decidedBy: 'decline' }
+      }
+      const edit = text.match(/^edit\s+([\s\S]+)$/i)
+      if (edit !== null) {
+        const lines = edit[1].split('\n').map(line => line.trim()).filter(line => line.length > 0)
+        const steps = lines.length > 1
+          ? lines.slice(1).map(step => ({ text: step, status: 'todo' }))
+          : state.steps.map(step => ({ text: step.text, status: step.status }))
         return {
           ...state,
-          steps: state.steps.map((step, i) => (i === index ? { ...step, status: String(args.status) } : step)),
+          restatement: lines[0] ?? state.restatement,
+          steps,
+          status: 'edited',
+          decidedBy: 'edit',
         }
-      } catch {
-        return state
       }
-    }
-    if (event.type === 'tool/result') {
-      const callId = String(event.data?.message?.source?.callId ?? '')
-      if (callId === '' || callId !== state.callId) return state
-      let status = 'confirmed'
-      for (const block of event.data?.message?.content ?? []) {
-        if (block?.type !== 'text') continue
-        const found = /^\[task-align:([a-z]+)\]/.exec(String(block.text ?? ''))
-        if (found !== null) { status = found[1]; break }
+      if (text === '' || /^(confirm|ok|yes|y|确认|确认开工|开始|好)$/i.test(text)) {
+        return { ...state, status: 'approved', decidedBy: 'confirm' }
       }
-      return { ...state, status }
+      return state
     }
+
     return state
   }
 
@@ -138,7 +178,11 @@ export function apply(ctx, config) {
         stateSchema: passThrough,
         init: () => EMPTY_PLAN,
         apply: foldPlan,
-        stateVersion: 1,
+        stateVersion: 2,
+        wire: {
+          viewSchema: passThrough,
+          view: state => state,
+        },
       }))
       .then(handle => {
         if (disposed) {
@@ -289,7 +333,8 @@ export function apply(ctx, config) {
           // 'approved' is what a continuation records now; the other two are
           // kept for sessions written by the older, blocking design.
           if (durable !== undefined
-            && (durable.status === 'approved' || durable.status === 'confirmed' || durable.status === 'edited')) {
+            && (durable.status === 'approved' || durable.status === 'edited'
+              || durable.status === 'confirmed')) {
             approved.set(exec.agent, { restatement: durable.restatement, steps: durable.steps })
           }
         }
@@ -440,7 +485,9 @@ export function apply(ctx, config) {
       const text = String(rawInput ?? '').trim()
       const pending = waiters.get(agent)
       const durable = pending === undefined ? durablePlan(agent) : undefined
-      const plan = pending?.record ?? (durable !== undefined ? { restatement: durable.restatement, steps: durable.steps } : undefined)
+      const plan = pending?.record ?? (durable !== undefined && durable.steps.length > 0
+        ? { restatement: durable.restatement, steps: durable.steps }
+        : undefined)
 
       // `done` never depends on a pending request: it is the escape hatch.
       if (/^(done|finish|完成|结束|收工)$/i.test(text)) {
