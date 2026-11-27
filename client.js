@@ -345,27 +345,8 @@ window.__ModuleLoader__.load({
           // confirming a plan wipes the very summary the user just earned.
           // The marker is matched on the serialized node because the node shape
           // is not part of this package's contract.
-          let wakeAfterPlan = false
-          let declinedAfterPlan = false
-          for (let i = planIndex + 1; i < nodes.length; i++) {
-            const node = nodes[i]
-            if (!node || node.kind !== 'user') continue
-            let serialized = ''
-            try {
-              serialized = JSON.stringify(node)
-            } catch {
-              serialized = ''
-            }
-            if (serialized.includes('[task-align:declined]')) {
-              declinedAfterPlan = true
-              continue
-            }
-            if (serialized.includes('[task-align] ')) {
-              wakeAfterPlan = true
-              continue
-            }
-            return null
-          }
+          // Status first: whether a later human message retires the row depends
+          // on it, and a pending gate must never be retired that way.
           let status = 'confirmed'
           const content = gateNode.content
           if (Array.isArray(content)) {
@@ -375,15 +356,52 @@ window.__ModuleLoader__.load({
               if (found !== null) { status = found[1]; break }
             }
           }
+
+          let wakeAfterPlan = false
+          let declinedAfterPlan = false
+          let sawLaterUserMessage = false
+          // A wake-up message only decides THIS gate when it lands after the
+          // newest gate call; messages left over from an earlier task must not
+          // mark a fresh awaiting card as already answered.
+          const wakeFrom = Math.max(planIndex, gateIndex) + 1
+          for (let i = planIndex + 1; i < nodes.length; i++) {
+            const node = nodes[i]
+            if (!node || node.kind !== 'user') continue
+            let serialized = ''
+            try {
+              serialized = JSON.stringify(node)
+            } catch {
+              serialized = ''
+            }
+            const isDeclined = serialized.includes('[task-align:declined]')
+            const isWake = !isDeclined && serialized.includes('[task-align] ')
+            if (isDeclined || isWake) {
+              if (i >= wakeFrom) {
+                if (isDeclined) declinedAfterPlan = true
+                else wakeAfterPlan = true
+              }
+              continue
+            }
+            sawLaterUserMessage = true
+          }
+
           // Clicking a button appends a wake-up message; that is the only log
           // trace of the decision, so it is what turns the card into a receipt.
           if (status === 'awaiting' && declinedAfterPlan) status = 'declined'
           else if (status === 'awaiting' && wakeAfterPlan) status = 'approved'
+
+          // A receipt belongs to the turn that produced it: a later human message
+          // retires it. A PENDING CARD is not a receipt — it stays until answered,
+          // otherwise asking "where is the card?" would hide the card itself.
+          if (sawLaterUserMessage && status !== 'awaiting') return null
           let restatement = ''
           let stepCount = 0
           let stepTexts = []
           let revision = false
-          const raw = planNode.call && typeof planNode.call.argsRaw === 'string' ? planNode.call.argsRaw : null
+          // A pending card speaks for ITSELF: its restatement and steps come from
+          // the gate call that is waiting, not from an older approved plan.
+          const sourceNode = status === 'awaiting' ? gateNode : planNode
+          const raw = sourceNode.call && typeof sourceNode.call.argsRaw === 'string' ? sourceNode.call.argsRaw : null
           if (raw !== null) {
             try {
               const parsed = JSON.parse(raw)
